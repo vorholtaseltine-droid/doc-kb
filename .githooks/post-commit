@@ -7,7 +7,7 @@
 set -e
 
 # Get repository root (where this script is located)
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
 
 cd "$REPO_ROOT"
 
