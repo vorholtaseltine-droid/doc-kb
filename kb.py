@@ -50,6 +50,10 @@ def _embed_query_for_search(query: str, manifest):
             embedder.load_state(TFIDF_PATH)
         except Exception:
             pass
+        # Force the query to use the SAME provider the index was built with;
+        # otherwise the embedder would re-probe and pick an API provider
+        # with a different embedding dimension.
+        embedder.provider = "local-tfidf"
     vec, prov, dim = embedder.embed_query(query)
     return vec
 
@@ -61,6 +65,11 @@ def search_docs(query: str, project=None, module=None, top_k: int = 5):
     store, manifest = _open_read_store()
     try:
         vec = _embed_query_for_search(query, manifest)
+        if len(vec) != int(manifest.get("dim") or 0):
+            raise ValueError(
+                "embedding dimension mismatch: query dim {} vs index dim {} "
+                "(embedding provider {} unavailable?)".format(len(vec), manifest.get("dim"), manifest.get("provider"))
+            )
         results = store.search(vec, top_k=int(top_k), module=module)
     finally:
         store.close()

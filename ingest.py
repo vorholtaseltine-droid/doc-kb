@@ -10,6 +10,7 @@ Git is the source of truth; the index is rebuildable at any time.
 - Index backend: Qdrant local mode (default) or SQLite (DOC_KB_BACKEND).
 """
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -229,7 +230,7 @@ def resolve_related_code(root: Path, meta):
     for entry in meta.get("related_code", []) or []:
         entry = str(entry)
         if "*" in entry:
-            files.extend(sorted(root.glob(entry)))
+            files.extend(Path(m) for m in sorted(glob.glob(str(root / entry), recursive=True)))
         else:
             p = root / entry
             if p.is_file():
@@ -347,6 +348,7 @@ def run_ingest(root, incremental: bool = True, backend=None):
     dim = manifest.get("dim") if isinstance(manifest, dict) else None
     backend_name = (backend or os.environ.get("DOC_KB_BACKEND", "qdrant")).lower()
     store = None
+    final_count = manifest.get("chunk_count", 0)
     if all_points or removed or full:
         texts = [p["text"] for p in all_points]
         embedder = Embedder()
@@ -384,6 +386,7 @@ def run_ingest(root, incremental: bool = True, backend=None):
                 p["vector"] = v
             store.upsert([{"vector": p.pop("vector"), "payload": p} for p in all_points])
             upserted = len(all_points)
+        final_count = store.count()
         store.close()
     else:
         provider = provider or "unknown"
@@ -398,10 +401,7 @@ def run_ingest(root, incremental: bool = True, backend=None):
         "chunk_count": 0,
     }
     if store is not None:
-        try:
-            new_manifest["chunk_count"] = store.count()
-        except Exception:
-            new_manifest["chunk_count"] = upserted
+        new_manifest["chunk_count"] = final_count
     else:
         new_manifest["chunk_count"] = manifest.get("chunk_count", 0)
     save_manifest(root, new_manifest)

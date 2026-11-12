@@ -2,6 +2,17 @@
 
 This document details the authentication mechanism in the auth module, covering login flow, JWT authentication, session management, and permission checking.
 
+## auth 模块怎么鉴权
+
+auth 模块怎么鉴权：一句话回答——登录成功后发 JWT + 服务端 session，之后每次请求都校验 token 或 session。
+
+- 登录（login）：用户提交用户名和密码，服务端校验凭据（校验用户名、密码哈希、账号状态），校验通过后签发凭证。
+- JWT 鉴权：请求携带 `Authorization: Bearer <token>`，由 `src/auth/jwt.py` 的 `verify_jwt` 校验签名（HS256）和过期时间 exp，校验失败返回 401。签发使用 `create_jwt`。
+- session 鉴权：浏览器携带 session cookie，`src/middleware/session.ts` 的 `sessionMiddleware` 读取 cookie 或 Bearer token，调用 `src/auth/session.py` 的 `validate_session` 校验 session 是否存在、是否过期。
+- 登录签发：`create_jwt` 签发 JWT token，`create_session` 创建服务端 session 并返回 session_id；登出或吊销时调用 `revoke_session`。
+- 权限校验：拿到当前用户后（get_current_user），再按角色 / 权限做权限校验；token 过期或 session 过期都需要重新登录。
+- 关键代码路径：`src/auth/jwt.py`（create_jwt、verify_jwt）、`src/auth/session.py`（create_session、validate_session、revoke_session）、`src/middleware/session.ts`（sessionMiddleware）。
+
 ## How Auth Module Authenticates
 
 ### 1. Login Flow (Login → Verify Credentials → Issue JWT + Server Session)

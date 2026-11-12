@@ -18,6 +18,7 @@ Usage:
 import hashlib
 import json
 import os
+import sys
 import math
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -83,23 +84,23 @@ class Embedder:
         try:
             self._test_gemini()
             self.provider = "gemini"
-            print("Using Gemini Embedding API")
+            print("Using Gemini Embedding API", file=sys.stderr)
             return
         except Exception as e:
-            print(f"Gemini API failed: {e}")
+            print("Gemini API failed: {} (http status {})".format(type(e).__name__, getattr(getattr(e, "response", None), "status_code", None)), file=sys.stderr)
         
         # Try OpenRouter second
         try:
             self._test_openrouter()
             self.provider = "openrouter"
-            print("Using OpenRouter Embedding API")
+            print("Using OpenRouter Embedding API", file=sys.stderr)
             return
         except Exception as e:
-            print(f"OpenRouter API failed: {e}")
+            print("OpenRouter API failed: {} (http status {})".format(type(e).__name__, getattr(getattr(e, "response", None), "status_code", None)), file=sys.stderr)
         
         # Fall back to local TF-IDF
         self.provider = "local-tfidf"
-        print("Using local TF-IDF fallback (warning: limited embedding quality)")
+        print("Using local TF-IDF fallback (warning: limited embedding quality)", file=sys.stderr)
     
     def _test_gemini(self):
         """Test Gemini Embedding API with a simple request."""
@@ -244,9 +245,20 @@ class Embedder:
         return vectors, "local-tfidf", dim
     
     def _tokenize(self, text: str) -> List[str]:
-        """Tokenize text into lowercase word characters."""
+        """Tokenize text into lowercase word characters.
+
+        CJK characters are also emitted one by one, so Chinese queries
+        can match Chinese words: regex \w+ alone keeps a whole Chinese
+        run as one token and would never match a single word like 鉴权.
+        """
         import re
-        return re.findall(r'\w+', text.lower())
+        tokens = re.findall(r'\w+', text.lower())
+        out = list(tokens)
+        for tok in tokens:
+            cjk = [ch for ch in tok if '\u4e00' <= ch <= '\u9fff']
+            if cjk:
+                out.extend(cjk)
+        return out
     
     def _fit_tfidf(self, texts: List[str]):
         """Fit TF-IDF model on training texts."""
@@ -284,7 +296,7 @@ class Embedder:
     def save_state(self, path: Path):
         """Save TF-IDF state to JSON file."""
         if self.provider != "local-tfidf":
-            print("Warning: save_state only applicable for local-tfidf provider")
+            print("Warning: save_state only applicable for local-tfidf provider", file=sys.stderr)
             return
         
         state = {
@@ -300,7 +312,7 @@ class Embedder:
     def load_state(self, path: Path):
         """Load TF-IDF state from JSON file."""
         if not path.exists():
-            print(f"Warning: State file not found at {path}")
+            print(f"Warning: State file not found at {path}", file=sys.stderr)
             return
         
         with open(path, 'r') as f:

@@ -445,3 +445,16 @@ def log_query(query_type, params, result):
 ```
 
 这些示例展示了 MCP 服务器如何为代理提供结构化、可查询的文档访问。每个工具都旨在满足特定的代理需求，从简单搜索到复杂上下文检索。
+## MCP 服务器的环境变量（重要）
+
+MCP 2.x 的 stdio 客户端只会继承一小部分白名单环境变量，不会把
+Shell 里的变量全部传给服务器进程。直接在 Shell 里运行 `make mcp`
+可以工作（Shell 里有 key 和代理变量），但被 OpenCode 等客户端以
+stdio 启动时，必须显式把下列变量传给服务器进程，否则 search 会因
+为没有 key 而回退到 local-tfidf（512 维，与索引的 1536 维不匹配，
+查不到结果）。仓库根目录的 `.opencode.json` 已经为 OpenCode 配好
+了这些变量：
+
+- `GEMINI_API_KEY`、`OPENROUTER_API_KEY`（Box Secrets）
+- `HTTP_PROXY`、`HTTPS_PROXY`、`http_proxy`、`https_proxy`、`NO_PROXY`、`no_proxy`（Box 走 127.0.0.1:3128 的出口代理）
+- `REQUESTS_CA_BUNDLE`、`SSL_CERT_FILE`、`NODE_EXTRA_CA_CERTS`（代理的 TLS 证书链，否则会出现 SSLError）

@@ -5,7 +5,7 @@
 ## 快速导航
 
 ### 📚 模块
-- [认证模块 (auth)](../modules/auth/index.md) — 如何进行身份验证和权限校验
+- [认证模块 (auth)](modules/auth/index.md) — 如何进行身份验证和权限校验
 
 ### 🏗️ 架构决策
 - [0001. 使用 Qdrant 作为向量索引](adr/0001-use-qdrant.md)

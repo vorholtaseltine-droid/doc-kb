@@ -1,122 +1,58 @@
-# MkDocs Configuration File
+site_name: Project Documentation Knowledge Base
+site_url: https://example.com
+site_description: Demo project documentation knowledge base with an MCP developer agent bridge
+repo_url: https://example.com/doc-kb
+copyright: Copyright &copy; 2025 doc-kb demo
 
-# Site information
-description: "Project Documentation Knowledge Base & Developer Agent Bridge"
-
-site_name: "Project Documentation Knowledge Base"
-site_url: "https://example.com/doc-kb"
-
-# Theme configuration
 theme:
   name: material
+  language: en
   palette:
-    primary: blue
-    accent: blue
-  # Material extension settings
-  custom_files:
-    - assets/stylesheets/custom.css
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+    - toc.integrate
 
-# Navigation structure
 nav:
   - Home: index.md
   - Modules:
-    - Auth: modules/auth/index.md
+      - Auth: modules/auth/index.md
   - ADRs:
-    - '0001 Use Qdrant': adr/0001-use-qdrant.md
+      - '0001 Use Qdrant': adr/0001-use-qdrant.md
   - Specs:
-    - Overview: specs/overview.md
-    - Ingest Pipeline: specs/ingest-pipeline.md
+      - Overview: specs/overview.md
+      - Ingest Pipeline: specs/ingest-pipeline.md
   - Runbooks:
-    - Rebuild Index: runbooks/rebuild-index.md
-    - Query MCP: runbooks/query-mcp.md
+      - Rebuild Index: runbooks/rebuild-index.md
+      - Query MCP: runbooks/query-mcp.md
 
-# Markdown configuration
+plugins:
+  - search:
+      lang: en
+      separator: '[\s\-,]+'
+
 markdown_extensions:
   - toc:
       permalink: true
-      title: 'Table of Contents'
-  - admonition:
-      title: 'Note'
-  - pymdownx.superfences:
-      enable_all: true
-      custom_languages:
-        - python:
-          - name: python
-          - aliases: [py]
-          - extensions: ['.py']
-        - typescript:
-          - name: typescript
-          - aliases: [ts]
-          - extensions: ['.ts']
-        - yaml:
-          - name: yaml
-          - aliases: [yml]
-          - extensions: ['.yaml', '.yml']
-        - bash:
-          - name: bash
-          - aliases: [shell, sh]
-          - extensions: ['.sh']
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.superfences
   - pymdownx.highlight:
-      use_pygments: true
-      pygments_style: github-dark
-  - pymdownx.emoji:
-      emoji_index: !!python/name:emoji.emoji_index
-      emoji_generator: !!python/name:emoji.emoji_generator
-  - pymdownx.tasks:
-      keyword: TODO
-      color: '#6BD3DA'
-
-# Plugins configuration
-plugins:
-  - search:
-      min_search_length: 3
-      prebuild_index: true
-      index_pages: true
-
-# Content processing
-exclude_from_nav:
-  - drafts/
-
-# Extensions
-include_copyright: false
-enable_meta_tags: true
-
-# Site settings
-use_directory_urls: true
-copyright: '© 2024 Project Documentation Knowledge Base'
-site_author: 'Project Team'
-
-# Internationalization
-# Uncomment to enable i18n
-# i18n:
-#   default_locale: 'en'
-#   locales: ['en', 'zh']
-
-# Development server
-extra_javascript:
-  - https://cdn.jsdelivr.net/npm/clipboard@2.0.6/dist/clipboard.min.js
-  - assets/javascripts/code-copy.js
-
-extra_css:
-  - assets/stylesheets/custom.css
-
-# Static files
-static_templates:
-  - 404.html
-
-# Build settings
-watch:
-  - docs/
-  - mkdocs.yml
-
-# Internationalization (optional)
-# Uncomment if you want to enable i18n
-# i18n:
-#   default_locale: 'en'
-#   locales:
-#     en:
-#       locale: 'en'
-#       source: 'en'
-#     zh:
-#       locale: 'zh'
-#       source: 'zh'
+      anchor_linenums: true
+      line_spans: __span
+  - pymdownx.inlinehilite:
+      style_plain_text: true
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
