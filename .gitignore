@@ -1,0 +1,132 @@
+# Dependencies
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.Python/VirtualEnv
+.pytest_cache/
+.coverage
+htmlcov/
+.hypothesis/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation output
+.Docusaurus
+.cache
+public
+
+# Project-specific outputs
+.doc-kb/
+site/
+drafts/
+
+# Environment
+.env
+.env.local
+.env.development
+.env.production
+
+# Logs and temp files
+*.log
+tmp/
+var/
+
+# Testing and coverage
+.coverage
+coverage.xml
+htmlcov/
+
+# Python virtual environment
+venv/
+env/
+
+# SSH keys
+*.pem
+id_rsa*
+
+# Docker
+.dockerignore
+Dockerfile
+docker-compose*.yml
+*.tar.gz
+*.tgz
+
+# Database files
+database.sqlite
+database.db
+
+# Temporary files
+temp/
+temp_*
+
+# Backup files
+*~#*.*.backup
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Git hooks
+git_hooks/
+
+# Misc
+*.orig
+*.rej
+*.patch
+*.diff
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Poetry
+poetry.lock
+
+# Pipenv
+Pipfile.lock
+
+# Yarn
+.yarn/
+
+# Node modules
+node_modules/
+
+# Gatsby
+.cache
+public/
+
+# Next.js
+.next/
+
+# Remix
+build/
+
+# Terraform
+.terraform/
+
+# Additional project-specific ignores
+
+# Qdrant storage volume (when using docker-compose)
+docker/qdrant_storage/
+
+# drafts directory (keeping .gitkeep)
+drafts/*
+!drafts/.gitkeep
+
+# MkDocs site build output
+site/

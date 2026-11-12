@@ -1,0 +1,12 @@
+module: auth
+owner: team-platform
+status: stable
+related_code:
+  - src/auth/**
+  - src/middleware/session.ts
+related_docs:
+  - adr/0001-use-qdrant.md
+tags:
+  - security
+  - session
+  - jwt

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+
+# Post-commit hook for incremental documentation ingestion
+# Runs best-effort and never fails the commit even if ingestion fails
+
+# Exit immediately if there's an error (but we'll catch it)
+set -e
+
+# Get repository root (where this script is located)
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+cd "$REPO_ROOT"
+
+# Check if ingest.py exists
+if [ ! -f "ingest.py" ]; then
+    echo "[WARNING] ingest.py not found, skipping incremental ingestion"
+    exit 0
+fi
+
+# Run incremental ingestion with error handling
+echo "[INFO] Running incremental documentation ingestion..."
+
+# Try to run ingest.py with --incremental flag, but don't fail if it fails
+try_incremental() {
+    python3 ingest.py --incremental
+    if [ $? -eq 0 ]; then
+        echo "[SUCCESS] Incremental ingestion completed successfully"
+        return 0
+    else
+        echo "[ERROR] Incremental ingestion failed"
+        return 1
+    fi
+}
+
+# Execute with timeout and capture output
+timeout 300 bash -c "
+    set -o pipefail
+    try_incremental
+" || {
+    echo "[WARNING] Incremental ingestion timed out or failed, but commit will continue"
+    # Continue without failing the commit
+}
+
+echo "[INFO] Post-commit hook completed"
