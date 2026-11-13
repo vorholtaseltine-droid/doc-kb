@@ -19,12 +19,30 @@ import hashlib
 import json
 import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+try:
+    from embedding_cache import EmbeddingCache, content_hash
+except ImportError:
+    EmbeddingCache = None
+    content_hash = None
 import math
 from pathlib import Path
 from typing import List, Tuple, Optional
 import requests
 from dotenv import load_dotenv
+
+# Gemini: gemini-embedding-001 is the ONLY embedding model in the live
+# Gemini API model list (2026-11-12). gemini-embedding-2 and
+# text-embedding-004 do not exist there and are not coded for. Dim stays
+# 3072 (model default); output_dimensionality is NOT used (see HANDOVER).
+GEMINI_MODEL = 'gemini-embedding-001'
+GEMINI_DIMENSION = 3072
+GEMINI_BATCH_SIZE = 32
+GEMINI_MAX_CONCURRENT_BATCHES = 2
+OPENROUTER_MODEL = 'openai/text-embedding-3-small'
+OPENROUTER_DIMENSION = 1536
 
 # Load environment variables
 load_dotenv()
@@ -32,98 +50,119 @@ load_dotenv()
 class Embedder:
     """Text embedding service with provider fallback and caching."""
     
-    def __init__(self):
+    def __init__(self, cache_path=None):
         self.provider: Optional[str] = None
         self.fitted: bool = False
         self.tfidf_vocabulary: Optional[List[float]] = None
         self.tfidf_idf: Optional[List[float]] = None
         self.dim: Optional[int] = None
+        self.model_name: Optional[str] = None
         self.state_path: Path = Path(".doc-kb") / "tfidf.json"
-        
-    def embed_texts(self, texts: List[str]) -> Tuple[List[List[float]], str, int]:
-        """
-        Generate embeddings for a list of texts.
-        
-        Args:
-            texts: List of text strings to embed
-            
-        Returns:
-            Tuple of (vectors, provider_name, dimension)
-            
-        Raises:
-            ValueError: If all embedding providers fail
-        """
+        self.cache_path = cache_path
+        self.cache = None
+        self.last_task_types: list = []
+        self.last_batch_sizes: list = []
+        self.last_cache_hits = 0
+        self.last_cache_misses = 0
+        self._pace_lock = threading.Lock()
+        self._last_call = 0.0
+    def embed_texts(self, texts: List[str], task_type: str = "RETRIEVAL_DOCUMENT") -> Tuple[List[List[float]], str, int]:
+        # Ingest chunks: RETRIEVAL_DOCUMENT; queries: RETRIEVAL_QUERY (embed_query).
+        # The task type is sent to Gemini on every request; OpenRouter ignores it.
+        if not texts:
+            return [], self.provider or "", 0
         if self.provider is None:
             self._probe_providers()
-        
-        # Try the cached working provider
+        self.last_task_types = [task_type] * len(texts)
+        cache = self._get_cache()
+        if cache is not None:
+            hashes = [content_hash(t) for t in texts]
+            cached = cache.get_many(hashes)
+            self.last_cache_hits = len(cached)
+            miss_idx = [i for i, h in enumerate(hashes) if h not in cached]
+            self.last_cache_misses = len(miss_idx)
+            vectors = [cached.get(h) for h in hashes]
+            if miss_idx:
+                miss_vecs, _, _ = self._embed_uncached([texts[i] for i in miss_idx], task_type)
+                cache.put_many({hashes[i]: miss_vecs[j] for j, i in enumerate(miss_idx)})
+                for j, i in enumerate(miss_idx):
+                    vectors[i] = miss_vecs[j]
+            dim = self.dim or (len(vectors[0]) if vectors and vectors[0] else 0)
+            return vectors, self.provider, dim
+        return self._embed_uncached(texts, task_type)
+
+    def _embed_uncached(self, texts, task_type):
         if self.provider == "gemini":
-            return self._embed_gemini(texts)
-        elif self.provider == "openrouter":
+            return self._embed_gemini(texts, task_type)
+        if self.provider == "openrouter":
             return self._embed_openrouter(texts)
-        elif self.provider == "local-tfidf":
+        if self.provider == "local-tfidf":
             return self._embed_tfidf(texts)
-        else:
-            raise ValueError(f"Unknown provider: {self.provider}")
-    
+        raise ValueError(f"Unknown provider: {self.provider}")
+
+    def _get_cache(self):
+        if not self.cache_path or EmbeddingCache is None:
+            return None
+        if self.provider not in ("gemini", "openrouter"):
+            return None
+        if self.cache is None:
+            self.cache = EmbeddingCache(self.cache_path, self.model_name or self.provider, self.dim or 0)
+        return self.cache
     def embed_query(self, text: str) -> Tuple[List[float], str, int]:
-        """
-        Generate embedding for a single query text.
-        
-        Args:
-            text: Text to embed
-            
-        Returns:
-            Tuple of (vector, provider_name, dimension)
-        """
-        vectors, provider, dim = self.embed_texts([text])
+        vectors, provider, dim = self.embed_texts([text], task_type="RETRIEVAL_QUERY")
         return vectors[0], provider, dim
-    
     def _probe_providers(self):
-        """Probe embedding providers in order of preference."""
-        # Try Gemini first
         try:
             self._test_gemini()
             self.provider = "gemini"
+            self.model_name = GEMINI_MODEL
+            self.dim = GEMINI_DIMENSION
             print("Using Gemini Embedding API", file=sys.stderr)
             return
         except Exception as e:
             print("Gemini API failed: {} (http status {})".format(type(e).__name__, getattr(getattr(e, "response", None), "status_code", None)), file=sys.stderr)
-        
-        # Try OpenRouter second
         try:
             self._test_openrouter()
             self.provider = "openrouter"
+            self.model_name = OPENROUTER_MODEL
+            self.dim = OPENROUTER_DIMENSION
             print("Using OpenRouter Embedding API", file=sys.stderr)
             return
         except Exception as e:
             print("OpenRouter API failed: {} (http status {})".format(type(e).__name__, getattr(getattr(e, "response", None), "status_code", None)), file=sys.stderr)
-        
-        # Fall back to local TF-IDF
         self.provider = "local-tfidf"
-        print("Using local TF-IDF fallback (warning: limited embedding quality)", file=sys.stderr)
-    
+        self.model_name = "local-tfidf"
+        self.dim = None
+        print("Using local TF-IDF fallback (no API available)", file=sys.stderr)
     def _test_gemini(self):
-        """Test Gemini Embedding API with a simple request."""
-        api_key = os.getenv("GEMINI_API_KEY")
+        api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_API_KEY not set")
-        
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
-        payload = {
-            "content": {
-                "parts": [{"text": "test"}]
-            }
-        }
-        
-        response = requests.post(url, json=payload, headers={"X-Goog-Api-Key": api_key}, timeout=30)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:batchEmbedContents"
+        payload = {"requests": [{"model": f"models/{GEMINI_MODEL}", "content": {"parts": [{"text": "test"}]}, "taskType": "RETRIEVAL_DOCUMENT"}]}
+        response = requests.post(url, json=payload, headers={"X-Goog-Api-Key": api_key, "Content-Type": "application/json"}, timeout=30)
         if response.status_code != 200:
-            raise Exception(f"Gemini API returned {response.status_code}: {response.text}")
-        
-        result = response.json()
-        if "embedding" not in result:
+            raise Exception(f"Gemini API returned {response.status_code}: {response.text[:200]}")
+        embeddings = response.json().get("embeddings") or []
+        if not embeddings or "values" not in embeddings[0]:
             raise Exception("Unexpected Gemini API response format")
-    
+        if len(embeddings[0]["values"]) != GEMINI_DIMENSION:
+            raise Exception(f"Unexpected Gemini embedding dimension: {len(embeddings[0]['values'])}")
+
+    def probe_output_dimensionality(self, dimension: int = 768):
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            return {"supported": False, "error": "GEMINI_API_KEY not set"}
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:batchEmbedContents"
+        payload = {"requests": [{"model": f"models/{GEMINI_MODEL}", "content": {"parts": [{"text": "test"}]}, "taskType": "RETRIEVAL_DOCUMENT", "outputDimensionality": dimension}]}
+        try:
+            response = requests.post(url, json=payload, headers={"X-Goog-Api-Key": api_key, "Content-Type": "application/json"}, timeout=30)
+        except Exception as e:
+            return {"supported": False, "error": str(e)}
+        if response.status_code != 200:
+            return {"supported": False, "status": response.status_code, "error": response.text[:200]}
+        values = (response.json().get("embeddings") or [{}])[0].get("values") or []
+        return {"supported": len(values) == dimension, "dimension": len(values), "status": response.status_code}
     def _test_openrouter(self):
         """Test OpenRouter Embedding API with a simple request."""
         api_key = os.getenv("OPENROUTER_API_KEY")
@@ -148,43 +187,60 @@ class Embedder:
         if "data" not in result:
             raise Exception("Unexpected OpenRouter API response format")
     
-    def _embed_gemini(self, texts: List[str]) -> Tuple[List[List[float]], str, int]:
-        """Generate embeddings using Gemini API."""
-        api_key = os.getenv("GEMINI_API_KEY")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
-        
-        vectors = []
-        
-        for text in texts:
-            payload = {
-                "content": {
-                    "parts": [{"text": text}]
-                }
-            }
-            
-            response = None
+    def _embed_gemini(self, texts: List[str], task_type: str = "RETRIEVAL_DOCUMENT") -> Tuple[List[List[float]], str, int]:
+        # Batch endpoint: 32 texts per request (API max 100), up to 2 batches
+        # in flight, >=0.7s between request starts, exponential backoff on
+        # 429/500/502/503/504 (up to 5 attempts, honours Retry-After).
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY not set")
+        self.model_name = GEMINI_MODEL
+        self.dim = GEMINI_DIMENSION
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:batchEmbedContents"
+        headers = {"X-Goog-Api-Key": api_key, "Content-Type": "application/json"}
+        batches = [texts[i:i + GEMINI_BATCH_SIZE] for i in range(0, len(texts), GEMINI_BATCH_SIZE)]
+        self.last_batch_sizes = [len(b) for b in batches]
+
+        def post_batch(batch):
+            payload = {"requests": [{"model": f"models/{GEMINI_MODEL}", "content": {"parts": [{"text": t}]}, "taskType": task_type} for t in batch]}
+            last_error = None
             for attempt in range(5):
-                response = requests.post(url, json=payload, headers={"X-Goog-Api-Key": api_key}, timeout=30)
-                if response.status_code in (429, 500, 502, 503, 504):
-                    time.sleep(10 * (attempt + 1))
+                with self._pace_lock:
+                    wait = 0.7 - (time.time() - self._last_call)
+                    if wait > 0:
+                        time.sleep(wait)
+                    self._last_call = time.time()
+                try:
+                    response = requests.post(url, json=payload, headers=headers, timeout=60)
+                except requests.RequestException as e:
+                    last_error = e
+                    time.sleep(min(2 ** attempt * 2, 60))
                     continue
-                break
-            if response.status_code != 200:
-                raise Exception(f"Gemini API returned {response.status_code}: {response.text}")
-            
-            result = response.json()
-            if "embedding" not in result:
-                raise Exception("Unexpected Gemini API response format")
-            
-            vectors.append(result["embedding"]["values"])
-            time.sleep(0.7)
-        
-        # Extract dimension from first vector
-        dim = len(vectors[0]) if vectors else 0
-        self.dim = dim
-        
-        return vectors, "gemini", dim
-    
+                if response.status_code == 200:
+                    embeddings = response.json().get("embeddings") or []
+                    if len(embeddings) != len(batch):
+                        raise ValueError(f"Gemini returned {len(embeddings)} embeddings for {len(batch)} texts")
+                    out = []
+                    for e in embeddings:
+                        vals = e.get("embedding", {}).get("values") if isinstance(e.get("embedding"), dict) else e.get("values")
+                        out.append(list(vals))
+                    return out
+                if response.status_code in (429, 500, 502, 503, 504):
+                    last_error = Exception(f"Gemini API returned {response.status_code}")
+                    retry_after = response.headers.get("Retry-After")
+                    delay = float(retry_after) if retry_after else min(2 ** attempt * 2, 60)
+                    time.sleep(delay)
+                    continue
+                raise Exception(f"Gemini API returned {response.status_code}: {response.text[:200]}")
+            raise last_error or Exception("Gemini API failed after retries")
+
+        if len(batches) == 1:
+            vectors = post_batch(batches[0])
+        else:
+            with ThreadPoolExecutor(max_workers=GEMINI_MAX_CONCURRENT_BATCHES) as pool:
+                results = list(pool.map(post_batch, batches))
+            vectors = [v for batch_vecs in results for v in batch_vecs]
+        return vectors, "gemini", GEMINI_DIMENSION
     def _embed_openrouter(self, texts: List[str]) -> Tuple[List[List[float]], str, int]:
         """Generate embeddings using OpenRouter API."""
         api_key = os.getenv("OPENROUTER_API_KEY")
