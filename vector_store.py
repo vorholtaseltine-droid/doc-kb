@@ -32,6 +32,7 @@ def _result_dict(payload: Dict[str, Any], score: float) -> Dict[str, Any]:
         "path": payload.get("path", ""),
         "heading_path": payload.get("heading_path", ""),
         "module": payload.get("module", ""),
+        "project_id": payload.get("project_id", ""),
         "commit_sha": payload.get("commit_sha", ""),
         "text": payload.get("text", ""),
         "type": payload.get("type", ""),
@@ -66,17 +67,19 @@ class QdrantStore:
                 self.client.delete_collection(COLLECTION)
                 self.client.create_collection(
                     COLLECTION,
-                    vectors_config=self._VectorParams(size=self.dim, distance=self._Distance.COSINE),
+                    vectors_config=self._VectorParams(size=self.dim, distance=self._Distance.COSINE, on_disk=True),
                 )
         except Exception:
             # Collection missing (or any lookup error) -> create it.
             try:
                 self.client.create_collection(
                     COLLECTION,
-                    vectors_config=self._VectorParams(size=self.dim, distance=self._Distance.COSINE),
+                    vectors_config=self._VectorParams(size=self.dim, distance=self._Distance.COSINE, on_disk=True),
                 )
             except Exception:
                 pass
+
+        self._ensure_payload_indexes()
 
     def recreate(self, dim: int):
         self.dim = int(dim)
@@ -84,10 +87,7 @@ class QdrantStore:
             self.client.delete_collection(COLLECTION)
         except Exception:
             pass
-        self.client.create_collection(
-            COLLECTION,
-            vectors_config=self._VectorParams(size=self.dim, distance=self._Distance.COSINE),
-        )
+        self._ensure_collection()
 
     def upsert(self, points: List[Dict[str, Any]]):
         from qdrant_client.models import PointStruct
@@ -142,6 +142,30 @@ class QdrantStore:
         except Exception:
             pass
 
+
+    def _ensure_payload_indexes(self):
+        # Payload indexes ONLY on project_id/module/commit_sha (the fields
+        # used as filters). text/heading_path/type/code_symbols stay unindexed.
+        from qdrant_client.models import PayloadSchemaType
+        for field in ("project_id", "module", "commit_sha"):
+            try:
+                self.client.create_payload_index(collection_name=COLLECTION, field_name=field, field_schema=PayloadSchemaType.KEYWORD)
+            except Exception:
+                pass
+
+    def fetch_all(self, module=None):
+        # All stored chunks (for BM25), optionally filtered by module.
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+        query_filter = None
+        if module:
+            query_filter = Filter(must=[FieldCondition(key="module", match=MatchValue(value=module))])
+        results, offset = [], None
+        while True:
+            points, offset = self.client.scroll(collection_name=COLLECTION, scroll_filter=query_filter, limit=250, offset=offset, with_payload=True, with_vectors=False)
+            results.extend(_result_dict(p.payload, 0.0) for p in points)
+            if offset is None:
+                break
+        return results
 
 class SQLiteStore:
     """SQLite vector store: embeddings as float32 blobs, cosine in Python."""
@@ -255,6 +279,16 @@ class SQLiteStore:
         except Exception:
             pass
 
+
+    def fetch_all(self, module=None):
+        if module:
+            rows = self.conn.execute("SELECT path, heading_path, module, commit_sha, text, type, code_symbols FROM chunks WHERE module=?", (module,)).fetchall()
+        else:
+            rows = self.conn.execute("SELECT path, heading_path, module, commit_sha, text, type, code_symbols FROM chunks").fetchall()
+        out = []
+        for path, heading_path, mod, sha, text, typ, symbols in rows:
+            out.append({"path": path, "heading_path": heading_path, "module": mod, "project_id": "", "commit_sha": sha, "text": text, "type": typ, "code_symbols": json.loads(symbols) if symbols else [], "score": 0.0})
+        return out
 
 def open_store(root: Path, dim: int, backend: Optional[str] = None):
     """Open a vector store. backend: 'qdrant' (default) or 'sqlite'."""

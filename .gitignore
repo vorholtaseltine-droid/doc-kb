@@ -129,4 +129,5 @@ drafts/*
 !drafts/.gitkeep
 
 # MkDocs site build output
-site/
+site/.sensitive
+.sensitive

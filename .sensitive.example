@@ -1,0 +1,6 @@
+# Copy this file to .sensitive (never commit .sensitive itself).
+# One repo-relative path pattern per line; '#' comments and blank lines ignored.
+# Patterns match with fnmatch, e.g.:
+# docs/internal/**
+# **/*.key
+# docs/**/draft-*.md

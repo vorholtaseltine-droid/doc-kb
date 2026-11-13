@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from embedder import Embedder
+from bm25 import bm25_scores, rrf_fuse, tokenize
 from vector_store import open_store
 
 ROOT = Path(__file__).resolve().parent
@@ -45,6 +46,10 @@ def _open_read_store(root: Path = ROOT):
 def _embed_query_for_search(query: str, manifest):
     embedder = Embedder()
     provider = manifest.get("provider", "")
+    if provider in ("gemini", "openrouter"):
+        embedder.provider = provider
+        embedder.dim = manifest.get("dim")
+        embedder.model_name = manifest.get("model") or provider
     if provider == "local-tfidf":
         try:
             embedder.load_state(TFIDF_PATH)
@@ -59,24 +64,55 @@ def _embed_query_for_search(query: str, manifest):
 
 
 def search_docs(query: str, project=None, module=None, top_k: int = 5):
-    """Vector-search the docs. Returns top_k result dicts."""
-    if project is not None and project != ROOT.name:
-        raise ValueError("unknown project: {}".format(project))
-    store, manifest = _open_read_store()
+    # Hybrid retrieval, actually wired: vector search (top 2*top_k) + BM25
+    # over all stored chunks, fused with reciprocal rank fusion (k=60).
+    # The query is embedded with task_type RETRIEVAL_QUERY (embed_query).
+    # Returned score is the RRF fusion score; 'retrieval' says which leg(s)
+    # ranked the chunk ('vector', 'bm25' or 'vector+bm25').
+    root = Path(__file__).resolve().parent
+    manifest_path = root / ".doc-kb" / "manifest.json"
+    if not manifest_path.exists():
+        raise RuntimeError("doc-kb index not found; run `make ingest` first")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    store, _manifest = _open_read_store(root)
     try:
         vec = _embed_query_for_search(query, manifest)
-        if len(vec) != int(manifest.get("dim") or 0):
-            raise ValueError(
-                "embedding dimension mismatch: query dim {} vs index dim {} "
-                "(embedding provider {} unavailable?)".format(len(vec), manifest.get("dim"), manifest.get("provider"))
-            )
-        results = store.search(vec, top_k=int(top_k), module=module)
+        n = top_k * 2
+        vector_results = store.search(vec, n, module=module)
+        try:
+            all_chunks = store.fetch_all(module=module)
+        except Exception:
+            all_chunks = []
+        if not all_chunks:
+            return vector_results[:top_k]
+        query_tokens = tokenize(query)
+        doc_tokens = [tokenize(c.get("text", "")) for c in all_chunks]
+        scores = bm25_scores(query_tokens, doc_tokens)
+        bm25_order = [i for i, s in sorted(enumerate(scores), key=lambda kv: -kv[1]) if s > 0][:n]
+        def doc_key(c):
+            return (c.get("path", ""), c.get("heading_path", ""), c.get("type", ""))
+        vector_keys = [doc_key(r) for r in vector_results]
+        bm25_keys = [doc_key(all_chunks[i]) for i in bm25_order]
+        fused = rrf_fuse([vector_keys, bm25_keys], k=60)
+        by_key = {}
+        for r in vector_results:
+            by_key.setdefault(doc_key(r), dict(r))
+        for i in bm25_order:
+            by_key.setdefault(doc_key(all_chunks[i]), dict(all_chunks[i]))
+        out = []
+        for key, rrf_score in fused[:top_k]:
+            row = by_key[key]
+            row["score"] = rrf_score
+            if key in vector_keys and key in bm25_keys:
+                row["retrieval"] = "vector+bm25"
+            elif key in vector_keys:
+                row["retrieval"] = "vector"
+            else:
+                row["retrieval"] = "bm25"
+            out.append(row)
+        return out
     finally:
         store.close()
-    for r in results:
-        if len(r.get("text", "")) > 600:
-            r["text"] = r["text"][:600] + "..."
-    return results
 
 
 def get_doc(path: str):

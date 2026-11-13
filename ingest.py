@@ -23,6 +23,7 @@ import yaml
 
 from embedder import Embedder
 from vector_store import open_store
+from sensitive import is_sensitive, load_sensitive_patterns
 
 ROOT = Path(__file__).resolve().parent
 STATE_DIRNAME = ".doc-kb"
@@ -258,17 +259,23 @@ def save_manifest(root: Path, manifest):
     (d / MANIFEST_NAME).write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def context_prefix(point):
+    title = point.get("heading_path") or point.get("path", "")
+    return f"[module: {point.get('module', '')}] [type: {point.get('type', '')}] [title: {title}] {point.get('text', '')}"
+
+
 def run_ingest(root, incremental: bool = True, backend=None):
     root = Path(root).resolve()
     state_dir = root / STATE_DIRNAME
     state_dir.mkdir(parents=True, exist_ok=True)
     manifest = load_manifest(root)
+    sensitive_patterns = load_sensitive_patterns(root)
     commit_sha = get_commit_sha(root)
     metas = load_module_meta(root)
     docs_dir = root / "docs"
-    discovered = []
-    if docs_dir.is_dir():
-        discovered = sorted(p for p in docs_dir.rglob("*.md") if "site" not in p.parts)
+    discovered_all = sorted(p for p in docs_dir.rglob("*.md") if "site" not in p.parts) if docs_dir.is_dir() else []
+    excluded_sensitive = sorted(str(p.relative_to(root)) for p in discovered_all if is_sensitive(str(p.relative_to(root)), sensitive_patterns))
+    discovered = [p for p in discovered_all if str(p.relative_to(root)) not in excluded_sensitive]
     relpaths = [str(p.relative_to(root)) for p in discovered]
     hashes = {rp: _sha256(root / rp) for rp in relpaths}
     manifest_files = manifest.get("files", {}) if isinstance(manifest, dict) else {}
@@ -311,6 +318,8 @@ def run_ingest(root, incremental: bool = True, backend=None):
         regen = (not manifest) or (idx in changed)
         for src in srcs:
             rel = str(src.relative_to(root))
+            if is_sensitive(rel, sensitive_patterns):
+                continue
             h = _sha256(src)
             code_files_now[rel] = h
             if manifest_code.get(rel) != h:
@@ -326,18 +335,20 @@ def run_ingest(root, incremental: bool = True, backend=None):
         for ch in chunk_markdown(text, rp):
             doc_points.append({
                 "path": rp, "heading_path": ch["heading_path"],
-                "module": mod, "commit_sha": commit_sha,
+                "module": mod, "commit_sha": commit_sha, "project_id": root.name,
                 "text": ch["text"], "type": "doc", "code_symbols": [],
             })
     code_points = []
     for name, srcs in code_by_module.items():
         for src in srcs:
             rel = str(src.relative_to(root))
+            if is_sensitive(rel, sensitive_patterns):
+                continue
             hint = "auth 模块鉴权相关代码 " if rel.startswith("src/auth/") else ""
             for s in extract_code_symbols(src):
                 code_points.append({
                     "path": rel, "heading_path": s["name"],
-                    "module": name, "commit_sha": commit_sha,
+                    "module": name, "commit_sha": commit_sha, "project_id": root.name,
                     "text": "{}{} in {}: {}".format(hint, s["name"], rel, s.get("preview", "")),
                     "type": "code", "code_symbols": [s["name"]],
                 })
@@ -345,20 +356,23 @@ def run_ingest(root, incremental: bool = True, backend=None):
     upserted = 0
     deleted = 0
     provider = manifest.get("provider", "") if isinstance(manifest, dict) else ""
+    model = manifest.get("model", "") if isinstance(manifest, dict) else ""
     dim = manifest.get("dim") if isinstance(manifest, dict) else None
     backend_name = (backend or os.environ.get("DOC_KB_BACKEND", "qdrant")).lower()
     store = None
     final_count = manifest.get("chunk_count", 0)
     if all_points or removed or full:
-        texts = [p["text"] for p in all_points]
-        embedder = Embedder()
+        texts = [context_prefix(p) for p in all_points]
+        embedder = Embedder(cache_path=state_dir / "embeddings_cache.db")
         if texts:
             vectors, provider, dim = embedder.embed_texts(texts)
+            model = embedder.model_name or provider
         else:
             # No new chunks: keep the existing provider/dim.
             vectors = []
             if not dim:
                 _, provider, dim = embedder.embed_texts(["probe"])
+                model = embedder.model_name or model
         if provider == "local-tfidf":
             try:
                 embedder.save_state(state_dir / TFIDF_NAME)
@@ -368,6 +382,8 @@ def run_ingest(root, incremental: bool = True, backend=None):
             print("warning: using offline local-tfidf embeddings (no API key worked)", file=sys.stderr)
         store = open_store(root, int(dim), backend=backend_name)
         if manifest.get("dim") and int(manifest["dim"]) != int(dim):
+            store.recreate(int(dim))
+        if manifest.get("model") and manifest["model"] != model:
             store.recreate(int(dim))
         if manifest.get("backend") and manifest["backend"] != backend_name:
             store.recreate(int(dim))
@@ -395,6 +411,7 @@ def run_ingest(root, incremental: bool = True, backend=None):
         "commit_sha": commit_sha,
         "dim": int(dim) if dim else 0,
         "provider": provider,
+        "model": model,
         "backend": backend_name,
         "files": hashes,
         "code_files": code_files_now,
@@ -413,6 +430,8 @@ def run_ingest(root, incremental: bool = True, backend=None):
         "provider": provider,
         "dim": int(dim) if dim else 0,
         "backend": backend_name,
+        "model": model,
+        "excluded_sensitive": len(excluded_sensitive),
         "chunks": new_manifest["chunk_count"],
     }
 

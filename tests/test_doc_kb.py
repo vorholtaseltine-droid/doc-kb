@@ -3,6 +3,7 @@
 Uses the real embedding API and the real vector store (no mocks).
 setUpModule builds/refreshes the index once via incremental ingest.
 """
+import json
 import os
 import shutil
 import subprocess
@@ -16,6 +17,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import ingest
 import kb
+import embedder
+from unittest.mock import patch as mock_patch
+from bm25 import bm25_scores, rrf_fuse, tokenize
+from embedding_cache import EmbeddingCache
+from ingest import context_prefix
+from sensitive import is_sensitive, load_sensitive_patterns
 
 
 def setUpModule():
@@ -91,5 +98,94 @@ class TestDocKb(unittest.TestCase):
             draft.unlink(missing_ok=True)
 
 
+
+    def test_gemini_batch_task_type_and_cache(self):
+        calls = []
+        class Resp:
+            status_code = 200
+            headers = {}
+            def __init__(self, payload):
+                self._payload = payload
+            def json(self):
+                return {"embeddings": [{"values": [0.01] * 3072} for _ in self._payload["requests"]]}
+        def fake_post(url, json=None, headers=None, timeout=None):
+            calls.append(json)
+            self.assertIn("batchEmbedContents", url)
+            self.assertEqual(headers.get("X-Goog-Api-Key"), "fake-key")
+            return Resp(json)
+        tmp = Path(tempfile.mkdtemp())
+        old_key = os.environ.get("GEMINI_API_KEY")
+        os.environ["GEMINI_API_KEY"] = "fake-key"
+        emb = embedder.Embedder(cache_path=tmp / "cache.db")
+        emb.provider = "gemini"
+        emb.model_name = "gemini-embedding-001"
+        emb.dim = 3072
+        texts = [f"chunk {i}" for i in range(35)]
+        with mock_patch.object(embedder.requests, "post", side_effect=fake_post):
+            vecs, prov, dim = emb.embed_texts(texts, task_type="RETRIEVAL_DOCUMENT")
+            self.assertEqual((len(vecs), prov, dim), (35, "gemini", 3072))
+            self.assertEqual(len(calls), 2)
+            self.assertEqual([len(c["requests"]) for c in calls], [32, 3])
+            for c in calls:
+                self.assertTrue(all(r["taskType"] == "RETRIEVAL_DOCUMENT" for r in c["requests"]))
+                self.assertTrue(all(r["model"] == "models/gemini-embedding-001" for r in c["requests"]))
+            self.assertEqual(emb.last_cache_misses, 35)
+            vecs2, _, _ = emb.embed_texts(texts, task_type="RETRIEVAL_DOCUMENT")
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(emb.last_cache_hits, 35)
+            self.assertEqual(len(vecs2), len(vecs))
+            self.assertAlmostEqual(vecs2[0][0], 0.01, places=5)
+            self.assertAlmostEqual(vecs2[-1][-1], 0.01, places=5)
+            q, _, _ = emb.embed_query("auth query")
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(calls[-1]["requests"][0]["taskType"], "RETRIEVAL_QUERY")
+            self.assertEqual(len(q), 3072)
+        if old_key is None:
+            os.environ.pop("GEMINI_API_KEY", None)
+        else:
+            os.environ["GEMINI_API_KEY"] = old_key
+    def test_embedding_cache_model_change_clears(self):
+        tmp = Path(tempfile.mkdtemp())
+        c = EmbeddingCache(tmp / "c.db", "gemini-embedding-001", 3072)
+        c.put_many({"h1": [0.5, 0.25]})
+        self.assertEqual(c.get_many(["h1"])["h1"], [0.5, 0.25])
+        c2 = EmbeddingCache(tmp / "c.db", "other-model", 1536)
+        self.assertTrue(c2.cleared)
+        self.assertEqual(c2.count(), 0)
+    def test_context_prefix_and_sensitive(self):
+        self.assertEqual(context_prefix({"module": "auth", "type": "doc", "heading_path": "Auth", "text": "body"}), "[module: auth] [type: doc] [title: Auth] body")
+        self.assertTrue(is_sensitive("docs/internal/x.md", ["docs/internal/**"]))
+        self.assertTrue(is_sensitive("a/b.key", ["**/*.key"]))
+        self.assertFalse(is_sensitive("docs/index.md", ["docs/internal/**"]))
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / ".sensitive").write_text("# comment\n\ndocs/internal/**\n", encoding="utf-8")
+        self.assertEqual(load_sensitive_patterns(tmp), ["docs/internal/**"])
+    def test_bm25_rrf_fusion(self):
+        self.assertEqual(tokenize("auth 模块怎么鉴权"), ["auth", "模", "块", "怎", "么", "鉴", "权"])
+        docs = [tokenize("auth 鉴权流程"), tokenize("unrelated topic")]
+        scores = bm25_scores(tokenize("auth 鉴权"), docs)
+        self.assertGreater(scores[0], scores[1])
+        self.assertEqual(rrf_fuse([["a", "b"], ["b", "a"]])[0][0], "a")
+    def test_sensitive_file_excluded_from_ingest(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "docs" / "modules" / "auth").mkdir(parents=True)
+        (tmp / "docs" / "internal").mkdir(parents=True)
+        (tmp / "docs" / "modules" / "auth" / "index.md").write_text("# Auth\n\nAuth docs.\n", encoding="utf-8")
+        (tmp / "docs" / "internal" / "secret.md").write_text("# Secret\n\nDo not index.\n", encoding="utf-8")
+        (tmp / ".sensitive").write_text("docs/internal/**\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(tmp)], check=True)
+        subprocess.run(["git", "-C", str(tmp), "-c", "user.email=t@t.t", "-c", "user.name=t", "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(tmp), "-c", "user.email=t@t.t", "-c", "user.name=t", "commit", "-qm", "fixture"], check=True)
+        report = ingest.run_ingest(tmp, incremental=False)
+        self.assertEqual(report["excluded_sensitive"], 1)
+        files = json.loads((tmp / ".doc-kb" / "manifest.json").read_text(encoding="utf-8"))["files"]
+        self.assertNotIn("docs/internal/secret.md", files)
+        self.assertIn("docs/modules/auth/index.md", files)
+    def test_search_results_include_retrieval_source(self):
+        results = kb.search_docs("auth 模块怎么鉴权", top_k=5)
+        self.assertTrue(results)
+        for r in results:
+            self.assertIn(r["retrieval"], ("vector", "bm25", "vector+bm25"))
+            self.assertIsInstance(r["score"], float)
 if __name__ == "__main__":
     unittest.main()
