@@ -63,6 +63,14 @@ class TestDocKb(unittest.TestCase):
             "verify_jwt symbol missing from code context",
         )
 
+    def _ingest_or_skip(self, tmp, incremental):
+        try:
+            return ingest.run_ingest(tmp, incremental=incremental)
+        except Exception as e:
+            if "429" in str(e):
+                self.skipTest("Gemini quota exhausted (429); retry after midnight PST")
+            raise
+
     def test_incremental_ingest_only_changed(self):
         """Incremental ingest processes 0 files when nothing changed, 1 after one edit."""
         tmp = Path(tempfile.mkdtemp(prefix="doc-kb-fixture-"))
@@ -74,13 +82,13 @@ class TestDocKb(unittest.TestCase):
             subprocess.run(["git", "-C", str(tmp), "config", "user.name", "test"], check=True, env=env)
             subprocess.run(["git", "-C", str(tmp), "add", "-A"], check=True, env=env)
             subprocess.run(["git", "-C", str(tmp), "commit", "-qm", "fixture"], check=True, env=env)
-            first = ingest.run_ingest(tmp, incremental=False)
+            first = self._ingest_or_skip(tmp, incremental=False)
             self.assertGreater(first["processed"], 0, "full ingest processed nothing: {}".format(first))
-            second = ingest.run_ingest(tmp, incremental=True)
+            second = self._ingest_or_skip(tmp, incremental=True)
             self.assertEqual(second["processed"], 0, "second incremental run should process 0 files: {}".format(second))
             idx = tmp / "docs" / "modules" / "auth" / "index.md"
             idx.write_text(idx.read_text(encoding="utf-8") + "\n## 新增小节\n内容补充。\n", encoding="utf-8")
-            third = ingest.run_ingest(tmp, incremental=True)
+            third = self._ingest_or_skip(tmp, incremental=True)
             self.assertEqual(third["processed"], 1, "after one edit, incremental run should process 1 file: {}".format(third))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -176,7 +184,7 @@ class TestDocKb(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(tmp)], check=True)
         subprocess.run(["git", "-C", str(tmp), "-c", "user.email=t@t.t", "-c", "user.name=t", "add", "-A"], check=True)
         subprocess.run(["git", "-C", str(tmp), "-c", "user.email=t@t.t", "-c", "user.name=t", "commit", "-qm", "fixture"], check=True)
-        report = ingest.run_ingest(tmp, incremental=False)
+        report = self._ingest_or_skip(tmp, incremental=False)
         self.assertEqual(report["excluded_sensitive"], 1)
         files = json.loads((tmp / ".doc-kb" / "manifest.json").read_text(encoding="utf-8"))["files"]
         self.assertNotIn("docs/internal/secret.md", files)

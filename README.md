@@ -83,3 +83,47 @@ make test
 ```
 
 See individual files for detailed specifications and procedures.
+## Gemini embedding migration (2026-11-12)
+
+- Model: gemini-embedding-001, dimension 3072 (the model default). It is the
+  only embedding model in the live Gemini API model list (checked 2026-11-12);
+  gemini-embedding-2 and text-embedding-004 do not exist there, so they are
+  not coded for. outputDimensionality was verified to work for this model
+  (768 requested -> 768-dim vector, HTTP 200) but is NOT used; the index stays
+  at 3072 for now.
+- Batching: batchEmbedContents, 32 texts per request (API max 100), up to 2
+  batches in flight, >= 0.7s between request starts, exponential backoff on
+  429/500/502/503/504 (up to 5 attempts, honours Retry-After). The key is sent
+  only via the X-Goog-Api-Key header, never as ?key=. Never print or paste a key.
+- task_type: RETRIEVAL_DOCUMENT for ingest chunks, RETRIEVAL_QUERY for
+  search queries (see Embedder.embed_texts / embed_query).
+- Cache: .doc-kb/embeddings_cache.db (SQLite, content hash -> float32 vector).
+  Unchanged chunks skip the API. A model or dimension change clears the cache,
+  and the collection manifest (manifest.json) records model + dimension; ingest
+  recreates the collection when either mismatches.
+- Chunk context prefix: [module: X] [type: Y] [title: Z] is prepended to chunk
+  text before embedding (ingest.context_prefix); the stored chunk text is unchanged.
+- Qdrant: vectors are stored on disk (on_disk=True). Payload indexes are
+  created only for project_id, module and commit_sha; other payload fields
+  stay unindexed. Note: local Qdrant ignores keyword payload indexes (it warns
+  that they have no effect locally); filtering still works.
+- Sensitive paths: a .sensitive file in the project root lists one fnmatch
+  pattern per line (e.g. docs/internal/**, **/*.key). Matching docs and code
+  are excluded from indexing and dropped from the manifest on the next ingest.
+  .sensitive is git-ignored; copy .sensitive.example to create it. Never commit
+  real sensitive paths.
+- Search: kb.search_docs is hybrid - vector search (top 2*top_k) + BM25 over
+  all stored chunks, fused with reciprocal rank fusion (k=60, bm25.py). Results
+  carry a retrieval field (vector, bm25 or vector+bm25) and an RRF score.
+  Query embeddings are pinned to the provider/dimension recorded in the manifest,
+  so a query can never be embedded with a different dimension than the index.
+- Chinese tokenization: CJK character-level (as in the TF-IDF fallback). jieba
+  is NOT installed: plain and --user pip install jieba both fail with the PEP 668
+  externally-managed-environment error. bm25.py uses jieba automatically if it is
+  ever installed; until then this is a recorded gap, not a blocker.
+- Quota: the Gemini daily quota (1,000 embed requests) was still exhausted on the
+  evening of 2026-11-12 (probe passed once, batch embeds then 429'd persistently).
+  The full rebuild is therefore pending the quota reset (around midnight PST).
+  After midnight, run make ingest INGEST_ARGS=--full, confirm the manifest says
+  provider: gemini, model: gemini-embedding-001, dim: 3072, then re-run
+  make test and the two example searches in HANDOVER.md. See HANDOVER.md for details.

@@ -178,3 +178,158 @@ Credits: 4,161 at start, 4,078 at end (83 used this session). Box main left Runn
 - Result: gh auth login did NOT complete. gh auth status still says: You are not logged into any GitHub hosts. No gh auth process is running. No repo was created, no remote was added, nothing was pushed. Local commit bb00f70 is intact.
 - The toolshelf .env token was not used, as instructed (read-only token). No .env file exists in doc-kb and .env is ignored (.gitignore line 39).
 - To retry later: run gh auth login --web again for a fresh device code, and complete the sudo-mode email step promptly (the emailed code is single-use and short-lived).
+
+## Gemini embedding migration - 2026-11-12 (evening)
+
+Work done on Simular Box "main" (signed in as vorholtaseltine@gmail.com), repo
+github.com/vorholtaseltine-droid/doc-kb, branch master. All code changes from
+Ethan's doc-kb_Gemini.docx are implemented, tested and committed. The full
+Gemini rebuild is NOT done yet: the Gemini daily quota was still exhausted on
+the evening of 2026-11-12 (see Quota below). It is the one remaining step, for
+after the midnight PST quota reset - exact commands are in 'Next step' below.
+
+### What changed, file by file
+
+- embedder.py: Gemini via batchEmbedContents - 32 texts/request (API max 100),
+  up to 2 batches in flight (ThreadPoolExecutor), >= 0.7s between request starts,
+  exponential backoff up to 5 attempts on 429/500/502/503/504, honours
+  Retry-After. task_type RETRIEVAL_DOCUMENT for ingestion, RETRIEVAL_QUERY for
+  queries (tracked in Embedder.last_task_types). Key sent only via the
+  X-Goog-Api-Key header, never as ?key=. Model pinned to gemini-embedding-001,
+  dimension 3072. Also a probe_output_dimensionality() helper. embed_texts() and
+  embed_query() consult the SQLite embedding cache before calling the API.
+- embedding_cache.py (new): SQLite cache at .doc-kb/embeddings_cache.db. Key is
+  the sha256 of the exact embedded text (including the context prefix), vectors
+  stored as float32. A model or dimension change drops all rows and updates the
+  meta table. Precision note: cached vectors round-trip through float32, so
+  e.g. 0.01 comes back as 0.009999999776482582 - tests compare with tolerance.
+- bm25.py (new): tokenize() (jieba if installed, otherwise CJK character-level),
+  bm25_scores() (k1=1.5, b=0.75), rrf_fuse() (k=60). JIEBA_AVAILABLE = False.
+- sensitive.py (new): loads .sensitive (one fnmatch pattern per line),
+  is_sensitive() decides per relative path.
+- ingest.py: prepends the context prefix [module: X] [type: Y] [title: Z] to
+  chunk text before embedding (stored chunk text is unchanged); excludes
+  .sensitive paths from docs and code (a file that becomes sensitive drops out
+  of the manifest and the index); adds project_id to payloads; the manifest now
+  records model alongside provider/dim, and the store is recreated on a model
+  or dimension mismatch. Uses Embedder(cache_path=state_dir/embeddings_cache.db).
+- vector_store.py: vectors created with on_disk=True at all three
+  create_collection sites; payload indexes created only for project_id, module,
+  commit_sha (each wrapped in try/except); _result_dict now includes project_id;
+  fetch_all(module=None) added to both stores (Qdrant scroll, SQLite SELECT) for
+  BM25; recreate() deletes the collection then recreates it with on_disk + indexes.
+- kb.py: search_docs is now genuinely hybrid - previously it was vector-only
+  despite the docstring claiming hybrid (no BM25/RRF existed anywhere in the
+  code). Now: vector search (top 2*top_k) + BM25 over fetch_all() + RRF (k=60);
+  results carry retrieval = vector/bm25/vector+bm25 and an RRF score. Query
+  embeddings are pinned to the manifest provider/dimension - this fixed a real
+  bug: with Gemini available, search probed Gemini and embedded a 3072-dim query
+  against the 1536-dim OpenRouter index.
+- tests/test_doc_kb.py: 10 tests (4 original + 6 new). New: gemini batch /
+  task_type / cache with mocked requests (35 texts -> 2 calls sized [32, 3],
+  taskType RETRIEVAL_DOCUMENT/RETRIEVAL_QUERY, cache hit makes no new calls);
+  cache model-change clears; context prefix + sensitive check; BM25/RRF fusion;
+  sensitive file excluded from ingest (excluded_sensitive == 1); search results
+  include a retrieval source. Tests that need a live ingest skip on a 429
+  (Gemini quota exhausted; retry after midnight PST) instead of failing.
+- .sensitive.example (new, template only) and .gitignore now ignores .sensitive
+  (verified: git check-ignore -v .sensitive). No .env file is in the repo.
+
+### Model and dimension actually used
+
+- Model: gemini-embedding-001 ONLY; dimension 3072 (the model default).
+- The live Gemini API model list on 2026-11-12 returns only
+  models/gemini-embedding-001. gemini-embedding-2 and text-embedding-004 do
+  NOT exist in that list, so they are not coded for anywhere.
+- output_dimensionality: verified supported for this model - a probe with
+  outputDimensionality=768 returned a 768-dim vector (HTTP 200). It is NOT used;
+  the index stays at 3072.
+- Live probe, 2026-11-12 22:10 PST (5 Gemini requests total that evening):
+  GEMINI TEST OK; batch provider gemini, dim 3072, n=2, batch_sizes [2],
+  tasks {RETRIEVAL_DOCUMENT}; query provider gemini, dim 3072, len 3072,
+  tasks {RETRIEVAL_QUERY}. Both task_types verified against the live API.
+
+### Quota - full rebuild is waiting, deliberately
+
+- The Gemini daily quota (1,000 embed requests) was exceeded earlier on
+  2026-11-12 and had NOT reset by 22:45 PST that evening.
+- Evidence: the 22:10 PST probe passed once (5 requests), but at ~22:43 PST a
+  test ingest probed Gemini OK ("Using Gemini Embedding API") and then the
+  embed call 429'd persistently after 5 retries (~62 s of backoff). A later run
+  had the probe itself 429 and fall back to OpenRouter. So a passing probe does
+  NOT prove quota is available - only a successful batch embed does.
+- Decision (per the assignment): do NOT burn remaining quota on repeated full
+  rebuilds tonight. The current index is still OpenRouter / 1536-dim (manifest:
+  commit 1d9aa5d, chunk_count 300, model field empty). It works; searches below
+  ran against it.
+
+### Tests - make test, 2026-11-12 22:53 PST
+
+- Ran 10 tests in 129.636s - OK (skipped=1). The one skip is
+  test_incremental_ingest_only_changed, which skipped on the persistent
+  Gemini 429 (see Quota). It should pass after the midnight reset.
+- Earlier in the evening the same suite failed with exactly that one test
+  erroring on 429; the skip-on-429 helper was added so the suite stays
+  green while quota is exhausted.
+- Debugging note: an exact assertEqual on two 35x3072 float lists that differ
+  only by float32 rounding made difflib spin at ~100% CPU for minutes; the
+  comparison now uses assertAlmostEqual with places=5.
+- Another bug fixed this evening: a mock test set GEMINI_API_KEY=fake-key without
+  restoring it, so later tests silently fell back to OpenRouter. The key is now
+  restored after that test.
+
+### Search results - real search_docs, 2026-11-12 22:54 PST
+
+Run via kb.search_docs (the function the MCP server wraps), top_k=5, against the
+current OpenRouter/1536 index - re-run both after the Gemini rebuild.
+
+Query 1: "auth 模块怎么鉴权"
+  1. 0.0307 vector+bm25 auth src/auth/session.py | _cleanup_expired_sessions
+  2. 0.0301 vector+bm25 auth src/auth/jwt.py | verify_jwt
+  3. 0.0299 vector+bm25 auth src/auth/session.py | validate_session
+  4. 0.0164 vector docs/index.md | Project docs > Quick nav > Modules
+  5. 0.0161 vector docs/modules/auth/index.md | Auth Module Documentation
+
+Query 2: "middleware 限流是怎么做的"
+  1. 0.0315 vector+bm25 docs/specs/ingest-pipeline.md | Indexing pipeline > Process
+  2. 0.0315 vector+bm25 docs/specs/ingest-pipeline.md | Checkpoints > Perf > Rate limiting
+  3. 0.0308 vector+bm25 docs/specs/ingest-pipeline.md | Indexing pipeline spec
+  4. 0.0306 vector+bm25 docs/specs/overview.md | System overview > Express middleware
+  5. 0.0292 vector+bm25 docs/adr/0001-use-qdrant.md | Using Qdrant > Context
+
+Hybrid retrieval works: most top hits are vector+bm25 (both legs agree). Note
+that with top_k=5 the auth doc ranks 5th (code chunks rank 1-3); with top_k=8
+the test asserting an auth doc in the top 3 passes.
+
+### Next step - full Gemini rebuild after the midnight PST reset
+
+1. Probe first with one small call (e.g. the test probe): a passing probe is
+   NOT enough - an embed must succeed without 429.
+2. make ingest INGEST_ARGS=--full (from /home/user/doc-kb). About 300 chunks,
+   32 per request, about 10 requests - well within the 1,000/day quota.
+3. Verify the ingest JSON reports provider: gemini, dim: 3072,
+   model: gemini-embedding-001, chunks about 300. Check .doc-kb/manifest.json
+   records the same model/dim, and that .doc-kb/embeddings_cache.db exists.
+4. Verify the Qdrant collection: on_disk vectors and the three payload indexes
+   (project_id, module, commit_sha); du -sh .doc-kb; free -m for memory.
+5. Run make test (no skips expected after the reset) and re-run the two search
+   queries above; record the results here.
+6. Commit + push if anything changed. Box credits were 3,736 at 22:45 PST on
+   2026-11-12 (3,795 at 20:55 PST); credit guard: stop below 500.
+
+### Known gaps and notes
+
+- jieba is NOT installed: plain and --user pip install fail with the PEP 668
+  externally-managed-environment error. BM25 uses CJK character-level tokens and
+  jieba is an optional runtime import in bm25.py.
+- Local Qdrant warns that keyword payload indexes have no effect locally (only
+  text indexes with scoring matter) - the indexes are still requested; filtering
+  works via scan. Server Qdrant would use them.
+- A repo post-commit hook runs an incremental ingest on every commit; it is
+  harmless (0 processed when nothing changed) but explains the ingest output
+  seen after each commit.
+- gh is logged in as vorholtaseltine-droid (verified 2026-11-12 21:19 PST); local
+  HEAD was 2 commits ahead of origin/master before this session's final push.
+- Commits: ae40cd1 (embedder + new modules) and 1d9aa5d (ingest / kb / vector_store
+  / tests / .gitignore / .sensitive.example). This HANDOVER/README/test-helper
+  commit is pushed as part of the same session.
