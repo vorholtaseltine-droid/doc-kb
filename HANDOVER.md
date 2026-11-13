@@ -124,3 +124,49 @@ SQLite 后端：`DOC_KB_BACKEND=sqlite make ingest`。依赖见 `requirements.tx
 3. 给 TF-IDF 兜底加中文分词（jieba），或在离线路径上加文档类型加权，改善中文排名。
 4. 评估是否把索引后端换成真正的 Qdrant Server（本地 PC 或有 Docker 的环境），以及是否引入 n8n / RAGFlow（v2）。
 5. 继续加模块（按 `docs/modules/<name>/index.md` + `meta.yaml` 的模式）和 runbook。
+
+## 8. 2026-11-12 - Gemini key replaced, embedder switched to Gemini (quota-blocked at wrap-up)
+- GEMINI_API_KEY replaced in Simular Secrets on 2026-11-12 (Secrets UI: Replaced Nov 12, 2026, ends in Shrg). Terminal env var is a Simular stand-in (first 3 cbv, len 36, does not end Shrg), not the real key.
+- Direct Gemini test: ?key= returns 400 API_KEY_INVALID; X-Goog-Api-Key header returns 200. embedder.py was changed to send the key via X-Goog-Api-Key header (no ?key=), so Simular swaps in the real key.
+- Live Gemini API model list: only models/gemini-embedding-001, no text-embedding-004. Code already used gemini-embedding-001; its default dim is 3072, not 768.
+- embedder.py fixes: extract result["embedding"]["values"] (was dim 1), 0.7 s pacing per embed (free tier 100/min), retry up to 5x on 429/500/502/503/504 with 10/20/30/40/50 s backoff.
+- Full rebuild: make ingest INGEST_ARGS=--full gave processed 7, skipped 0, upserted 303, deleted 0, provider gemini, dim 3072, backend qdrant, chunks 300. Manifest now provider gemini, dim 3072. Plain make ingest (incremental) alone does NOT rebuild on provider change.
+- make test: FAILED (errors=2), Ran 4 tests in 337.165 s. Passed: test_get_module_context, test_write_doc_suggestion. Errors: test_incremental_ingest_only_changed, test_search_auth_returns_doc_and_code - both from Gemini free-tier DAILY quota: Embed content requests per day limit exceeded, limit 1000, retry about 5h24m (reset about midnight PST 2026-11-13). Query fell back to OpenRouter (dim 1536) vs index 3072: embedding dimension mismatch.
+- MCP search_docs auth query, top_k=5, via MCP server: FAILED with the same dimension mismatch error, no results, same quota reason.
+- After quota resets at midnight PST, re-run make test and the MCP search; they should pass without rebuilding the index (already Gemini/3072). Do not rebuild again unless needed - a full rebuild costs about 300 Gemini requests, plus the test suite fixture ingest about 300 more.
+- Box credits at wrap-up: 4,161 left (Box Free; 4,323 at start, 162 used). Box main left Running. embedder.py and HANDOVER.md are modified in git (uncommitted).
+
+## 9. 2026-11-13 - Phase 4 (Agent.docx, this session, 02:45-03:15 UTC)
+
+Credits: 4,161 at start, 4,078 at end (83 used this session). Box main left Running. No subscription, no payment method added, no second box, no residential IP.
+
+### Step 1 - Credit + wake check: PASS
+- Balance 4,161 at start, above the 500 stop threshold. main was Running, no wake needed.
+- Usage Nov 1-13: 771 credits ($0.77), 4.3 h, 0 GB residential. Billing: Box Free, 5,000 free credits once, auto top-up Off.
+
+### Step 2 - Embedding switch: FAILED (quota, not auth)
+- Plain make ingest: processed 0, skipped 7, upserted 0, provider gemini, dim 3072, exit 0. It re-embedded nothing, so that line alone proves nothing.
+- Full rebuild make ingest INGEST_ARGS=--full: Gemini API failed: Exception (http status None), then Using OpenRouter Embedding API; processed 7, skipped 0, upserted 303, deleted 0, provider openrouter, dim 1536, backend qdrant, chunks 300, exit 0.
+- Direct probe Embedder()._test_gemini(): Gemini API returned 429: RESOURCE_EXHAUSTED, Embed content requests per day limit exceeded on Free Tier, quotaId EmbedContentRequestsPerDayPerUserPerProjectPerModel-FreeTier, quota 1000 per day, retryDelay 18247 s (about 5 h 4 m, reset about midnight PST Nov 13).
+- The key is accepted (no 400 API_KEY_INVALID any more); the free-tier daily embedding quota is exhausted. Code uses gemini-embedding-001, not text-embedding-004 (no such model in the live list, see section 8).
+- Correction to section 8: the full rebuild in this session reverted the index from Gemini/3072 back to OpenRouter/1536. After the quota resets, run make ingest INGEST_ARGS=--full once to restore Gemini/3072, then re-run make test and the MCP search.
+- make test: PASS, Ran 4 tests in 7.251 s, OK, exit 0.
+- Section 7.1 search search_docs(auth 模块怎么鉴权, top_k=5): PASS on the OpenRouter index. Rank 1 docs/index.md 0.7127, rank 2 docs/modules/auth/index.md 0.6726, rank 3 docs/modules/auth/index.md 0.6031, rank 4 docs/runbooks/query-mcp.md 0.5714, rank 5 src/auth/jwt.py verify_jwt 0.5411.
+
+### Step 3 - OpenCode to MCP end-to-end: PASS (after a config fix)
+- MCP server itself works over stdio: initialize + tools/list returns 5 tools (search_docs, get_doc, get_module_context, list_changed_since, write_doc_suggestion), exit 0.
+- First two OpenCode runs (google/gemini-3.5-flash-lite) did NOT use MCP: the model tried list_mcp_resources (no such tool), then read mcp_server.py and ran python kb.search_docs directly. The second run also hit the Gemini chat per-minute quota (generate_content_free_tier_requests, limit 15 per minute, retry 29 s).
+- Root cause: the MCP config lived only in .opencode.json, which OpenCode does not load. Copied it to opencode.json (the project config file OpenCode loads). Third run: the model called tools[doc-kb].search_docs({query: auth 模块怎么鉴权, top_k: 5}) through MCP and reported docs/index.md top, docs/modules/auth/index.md, and src/auth/jwt.py. Exit 0. The OpenRouter model route was not needed.
+- Note: keep opencode.json (with the mcp section) as the loaded config; .opencode.json is the same content under the old name.
+
+### Step 4 - GitHub backup: BLOCKED (no GitHub auth on Box)
+- gh auth status: You are not logged into any GitHub hosts. gh repo create vorholtaseltine-droid/doc-kb --public failed with: To get started with GitHub CLI, please run: gh auth login. Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token. Exit code 4. No repo was created and no remote was added.
+- No GH_TOKEN or GITHUB_TOKEN in the Box environment, no git credential helper, no ~/.config/gh, no ~/.gitconfig. Box Secrets holds only GEMINI_API_KEY and OPENROUTER_API_KEY, no GitHub token.
+- Next step needs the user: run gh auth login on Box, or add a GitHub token, then run gh repo create vorholtaseltine-droid/doc-kb --public --source . --remote origin --push. Do not invent credentials.
+- Toolshelf backup check: ~/toolshelf is not a git repo (no .git) and holds update.py, update.py.bak, data.json, index.html and .env (107 bytes; never push .env to a public repo). ~/toolshelf-public is not a git repo either (data.json, index.html). So toolshelf update.py + .env are NOT backed up in git anywhere on Box.
+- OpenCode config backup check: .opencode.json IS tracked in git (git ls-files). opencode.json (new file this session) is untracked until the commit below; neither file is ignored.
+
+### Step 5 - Close-out
+- This section is the close-out. Credits remaining 4,078. Box main left Running.
+- Commit below includes: embedder.py (header auth + retries, from section 8), HANDOVER.md (sections 8-9), opencode.json (MCP config in the loaded filename).
+- Still open after this session: (1) Gemini embedding quota until about midnight PST Nov 13, then re-run the full Gemini ingest; (2) GitHub backup, needs GitHub auth from the user.

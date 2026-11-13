@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "doc-kb": {
+      "type": "local",
+      "command": ["python3", "mcp_server.py"],
+      "environment": {
+        "GEMINI_API_KEY": "{env:GEMINI_API_KEY}",
+        "OPENROUTER_API_KEY": "{env:OPENROUTER_API_KEY}",
+        "HTTP_PROXY": "{env:HTTP_PROXY}",
+        "HTTPS_PROXY": "{env:HTTPS_PROXY}",
+        "http_proxy": "{env:http_proxy}",
+        "https_proxy": "{env:https_proxy}",
+        "NO_PROXY": "{env:NO_PROXY}",
+        "no_proxy": "{env:no_proxy}",
+        "REQUESTS_CA_BUNDLE": "{env:REQUESTS_CA_BUNDLE}",
+        "SSL_CERT_FILE": "{env:SSL_CERT_FILE}",
+        "NODE_EXTRA_CA_CERTS": "{env:NODE_EXTRA_CA_CERTS}"
+      }
+    }
+  }
+}

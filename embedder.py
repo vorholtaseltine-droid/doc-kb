@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 import math
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -108,14 +109,14 @@ class Embedder:
         if not api_key:
             raise ValueError("GEMINI_API_KEY not set")
         
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
         payload = {
             "content": {
                 "parts": [{"text": "test"}]
             }
         }
         
-        response = requests.post(url, json=payload, timeout=30)
+        response = requests.post(url, json=payload, headers={"X-Goog-Api-Key": api_key}, timeout=30)
         if response.status_code != 200:
             raise Exception(f"Gemini API returned {response.status_code}: {response.text}")
         
@@ -150,7 +151,7 @@ class Embedder:
     def _embed_gemini(self, texts: List[str]) -> Tuple[List[List[float]], str, int]:
         """Generate embeddings using Gemini API."""
         api_key = os.getenv("GEMINI_API_KEY")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
         
         vectors = []
         
@@ -161,7 +162,13 @@ class Embedder:
                 }
             }
             
-            response = requests.post(url, json=payload, timeout=30)
+            response = None
+            for attempt in range(5):
+                response = requests.post(url, json=payload, headers={"X-Goog-Api-Key": api_key}, timeout=30)
+                if response.status_code in (429, 500, 502, 503, 504):
+                    time.sleep(10 * (attempt + 1))
+                    continue
+                break
             if response.status_code != 200:
                 raise Exception(f"Gemini API returned {response.status_code}: {response.text}")
             
@@ -169,7 +176,8 @@ class Embedder:
             if "embedding" not in result:
                 raise Exception("Unexpected Gemini API response format")
             
-            vectors.append(result["embedding"])
+            vectors.append(result["embedding"]["values"])
+            time.sleep(0.7)
         
         # Extract dimension from first vector
         dim = len(vectors[0]) if vectors else 0
