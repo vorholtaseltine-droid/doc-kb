@@ -170,3 +170,11 @@ Credits: 4,161 at start, 4,078 at end (83 used this session). Box main left Runn
 - This section is the close-out. Credits remaining 4,078. Box main left Running.
 - Commit below includes: embedder.py (header auth + retries, from section 8), HANDOVER.md (sections 8-9), opencode.json (MCP config in the loaded filename).
 - Still open after this session: (1) Gemini embedding quota until about midnight PST Nov 13, then re-run the full Gemini ingest; (2) GitHub backup, needs GitHub auth from the user.
+
+### Device-flow retry 2026-11-13 03:18-03:34 UTC (continuation)
+- gh auth login --web gave device code D45D-BD76 (host github.com, HTTPS). Code entered at github.com/login/device as vorholtaseltine-droid.
+- The Authorize github button on the confirmation page was disabled at first (two page loads, 60 s wait, expanding a scope did not enable it); it became enabled later and was clicked.
+- GitHub then required sudo-mode re-authentication and sent an email verification code to v**************@gmail.com (19:22 PST). The code was requested from Muse, but Muse reported it had expired by 19:33 PST, so it was never entered. No new email was triggered and no code was guessed.
+- Result: gh auth login did NOT complete. gh auth status still says: You are not logged into any GitHub hosts. No gh auth process is running. No repo was created, no remote was added, nothing was pushed. Local commit bb00f70 is intact.
+- The toolshelf .env token was not used, as instructed (read-only token). No .env file exists in doc-kb and .env is ignored (.gitignore line 39).
+- To retry later: run gh auth login --web again for a fresh device code, and complete the sudo-mode email step promptly (the emailed code is single-use and short-lived).
