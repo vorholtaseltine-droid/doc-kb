@@ -1,3 +1,40 @@
+## Update 2026-11-14 09:40 PST - Post-midnight Gemini full rebuild: probe OK, rebuild blocked by 429
+
+Credits: 3,184 at session start (09:24 PST; last seen 3,736 before this session) and 3,184 at session end. Box main was woken from Sleeping and left Running.
+
+### 1. Gemini quota probe
+
+- First probe used the wrong endpoint (/v1beta/models:batchEmbedContents) and returned HTTP 404 with an empty body. That was my mistake, not a quota signal. Corrected to the URL the embedder itself uses (/v1beta/models/gemini-embedding-001:batchEmbedContents).
+- Corrected probe, 09:28 PST, 2 texts, X-Goog-Api-Key header only (never ?key=): HTTP 200, 2 embeddings, dims [3072, 3072]. Probe SUCCEEDED. Quota is not fully exhausted.
+
+### 2. Full rebuild - FAILED, stopped, no retries
+
+- Command: make ingest INGEST_ARGS=--full. Started 09:28:35 PST, failed 09:29:42 PST.
+- Exact error: Exception: Gemini API returned 429 (embedder.py _embed_gemini, via ingest.py:385; make: [Makefile:16: ingest] Error 1, make exit code 2). No JSON report was produced.
+- No retries were attempted, per the stop rule.
+- Read: the key can serve one tiny probe (2 texts) but not even one 32-text batch. Remaining quota is too small for a 300-chunk rebuild right now. Re-probe before any new rebuild attempt.
+- State after the failed run: manifest unchanged (provider openrouter, model empty, dim 1536, chunk_count 300, commit acdc821cc76bf68344d40963ca6972900e31d37b, backend qdrant). Qdrant index on disk untouched (still the Nov 13 OpenRouter index). BUT the --full run reset the SQLite embeddings cache before dying: .doc-kb/embeddings_cache.db meta now says model gemini-embedding-001 and dimension 3072, and the cache holds 0 rows (the previous OpenRouter cache entries were wiped). The live Qdrant index is unaffected, so search still works. The cache will be rebuilt by the next successful ingest.
+
+### 3. Tests and searches (run via OpenCode, see section 5; against the existing Nov 13 OpenRouter index, NOT a Gemini rebuild)
+
+- make test: 10 passed, 1 skipped, 77.7s. The skip is test_incremental_ingest_only_changed, skipped with message: Gemini quota exhausted (429); retry after midnight PST. The no-skips expectation was not met, because of the same 429.
+- Search auth 模块怎么鉴权 (top_k=5): 1. src/auth/session.py 0.03068; 2. src/auth/jwt.py 0.03009; 3. src/auth/session.py 0.02985; 4. docs/index.md 0.01639; 5. docs/modules/auth/index.md 0.01613.
+- Search middleware 限流是怎么做的 (top_k=5): 1. docs/specs/ingest-pipeline.md 0.03154; 2. docs/specs/ingest-pipeline.md 0.03151; 3. docs/specs/ingest-pipeline.md 0.03080; 4. docs/specs/overview.md 0.03055; 5. docs/adr/0001-use-qdrant.md 0.02920. Note: top hits are ingest-pipeline docs, not middleware implementation notes. The rate-limit answer lives in the pipeline spec.
+- Query embedding for search forces the manifest provider (openrouter), so searches keep working on the 1536-dim index despite the Gemini 429.
+
+### 4. Toolshelf backup
+
+- /home/user/toolshelf/update.py and /home/user/toolshelf/.env are now backed up in the PRIVATE GitHub repo vorholtaseltine-droid/toolshelf-private (visibility PRIVATE, verified), commit 7b76130 on master, plus a short README. Only those two files plus README are in the repo. Token value was not displayed anywhere.
+
+### 5. Real-task proof, default model route
+
+- The verification work above (make test, manifest check, both searches, cache check) was done in this session through OpenCode on Box with explicit --model google/gemini-3.5-flash-lite and --auto (opencode run, exit code 0). No fallback was needed. openrouter/cohere/north-mini-code:free was not used. gemini-3.8-flash and the built-in OpenCode GLM free model were not used. Full log: /tmp/opencode_proof.log (Box only, not committed).
+
+### Next steps
+
+- Re-probe Gemini before any new rebuild attempt. If the probe passes, a rebuild may still 429 mid-run, so watch the first batch.
+- The embeddings cache is empty (0 rows). The next successful ingest repopulates it.
+
 # 项目文档知识库 & 开发者 Agent 桥接 — 交接文档
 
 - 日期：2026-11-12（UTC+8 11 月 12 日晚 / 太平洋时间上午）
