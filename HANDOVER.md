@@ -1,3 +1,12 @@
+## Update 2026-11-14 19:18 PST - Independent verification of the 18:38 batch-8 rebuild; daily Gemini request quota now exhausted
+
+- Rebuild verified independently: Qdrant collection doc_kb has 300 points, vector size 3072, Cosine distance. Manifest: provider gemini, model gemini-embedding-001, dim 3072, chunk_count 300, commit d63f7b9. SQLite cache: 301 rows (300 chunks + 1 query embedding), meta model gemini-embedding-001, dimension 3072.
+- Searches re-run directly via kb.search_docs: auth query returns src/auth/jwt.py chunks first, verify_jwt at rank 3, docs/modules/auth/index.md at rank 5. Middleware rate-limit query returns docs/specs/ingest-pipeline.md rate-limit section first.
+- Gate finding: the morning 429 was the per-minute tokens quota, quotaId EmbedContentTokensPerMinutePerProjectPerModel-FreeTier, metric generativelanguage.googleapis.com/embed_content_free_tier_tokens, limit 30000, RetryInfo retryDelay 10s. Reproduced verbatim by a 32-text probe at 18:36 PST. It was not the daily quota, so the rebuild was correctly approved.
+- make test re-run twice by this verification session: 19:00 run FAILED errors=1 skipped=1 in 229.6s; 19:10 run FAILED errors=2 in 148.7s. All failures are live-API search tests raising Gemini API returned 429 after retries. One test also logged Gemini API failed Exception http status None. Non-API tests pass. The 18:51 run of the same suite passed 10 tests with no skips, so the suite itself is sound.
+- Single-shot probe 19:16 PST: HTTP 429, metric generativelanguage.googleapis.com/embed_content_free_tier_requests, limit 1000, quotaId EmbedContentRequestsPerDayPerUserPerProjectPerModel-FreeTier, RetryInfo retryDelay 17037s (about 4h44m, reset about midnight PST). The daily request budget is exhausted, so live-API tests and uncached searches cannot pass until after the midnight PST reset. Do not re-run make test tonight.
+- Credits: 3,020 at 18:46 PST and 3,020 at 19:10 PST. Box main was Running the whole session. No subscription, payment method, or second box was used.
+
 ## Update 2026-11-14 18:51 PST - Gemini full rebuild at 8/batch: SUCCEEDED
 Credits: 3,025 at session start and 3,025 at session end (last seen 3,184 before this session). Box main was woken from Sleeping and left Running.
 
