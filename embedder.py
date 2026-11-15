@@ -39,8 +39,9 @@ from dotenv import load_dotenv
 # 3072 (model default); output_dimensionality is NOT used (see HANDOVER).
 GEMINI_MODEL = 'gemini-embedding-001'
 GEMINI_DIMENSION = 3072
-GEMINI_BATCH_SIZE = 32
-GEMINI_MAX_CONCURRENT_BATCHES = 2
+GEMINI_BATCH_SIZE = 8
+GEMINI_MAX_CONCURRENT_BATCHES = 1
+GEMINI_PACE_SECONDS = 3.0  # seconds between batches; 2026-11-14 429 was tokens-per-minute (RetryInfo retryDelay 10s), so pace well under 30k tokens/min
 OPENROUTER_MODEL = 'openai/text-embedding-3-small'
 OPENROUTER_DIMENSION = 1536
 
@@ -188,8 +189,8 @@ class Embedder:
             raise Exception("Unexpected OpenRouter API response format")
     
     def _embed_gemini(self, texts: List[str], task_type: str = "RETRIEVAL_DOCUMENT") -> Tuple[List[List[float]], str, int]:
-        # Batch endpoint: 32 texts per request (API max 100), up to 2 batches
-        # in flight, >=0.7s between request starts, exponential backoff on
+        # Batch endpoint: 8 texts per request, one batch at a time (2026-11-14: 32-text batches hit TPM 429)
+        # >=3s between request starts, exponential backoff on
         # 429/500/502/503/504 (up to 5 attempts, honours Retry-After).
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
@@ -206,7 +207,7 @@ class Embedder:
             last_error = None
             for attempt in range(5):
                 with self._pace_lock:
-                    wait = 0.7 - (time.time() - self._last_call)
+                    wait = GEMINI_PACE_SECONDS - (time.time() - self._last_call)
                     if wait > 0:
                         time.sleep(wait)
                     self._last_call = time.time()

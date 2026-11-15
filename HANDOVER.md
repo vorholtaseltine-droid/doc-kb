@@ -1,3 +1,36 @@
+## Update 2026-11-14 18:51 PST - Gemini full rebuild at 8/batch: SUCCEEDED
+Credits: 3,025 at session start and 3,025 at session end (last seen 3,184 before this session). Box main was woken from Sleeping and left Running.
+
+### 0. Morning 429 - which quota (verbatim, reproduced by probe)
+- The morning run itself only logged Exception: Gemini API returned 429 (embedder.py _embed_gemini; no body - the retry path raises the bare status). Its 67 s runtime (09:28:35-09:29:42 PST) already rules out an hours-long retryDelay: 5 attempts with exponential backoff 2+4+8+16+32 s is about 62 s.
+- Reproduced 18:36 PST with a single 32-text probe (realistic ~6,100-char texts): HTTP 429, RESOURCE_EXHAUSTED.
+  - message: "You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://aistudio.google.com/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. * Quota exceeded for metric: generativelanguage.googleapis.com/embed_content_free_tier_tokens, limit: 30000, model: gemini-embedding-1.0, description: Embed content tokens per minute limit exceeded on Free Tier. See https://aistudio.google.com/docs/rate-limits. Please retry in 10.422299387s."
+  - QuotaFailure violation: description "Embed content tokens per minute limit exceeded on Free Tier.", quotaMetric "generativelanguage.googleapis.com/embed_content_free_tier_tokens", quotaId "EmbedContentTokensPerMinutePerProjectPerModel-FreeTier", quotaDimensions model "gemini-embedding-1.0", location "global", quotaValue "30000".
+  - RetryInfo retryDelay "10s". No Retry-After HTTP header was present.
+  - Verdict: PER-MINUTE tokens quota (30,000 TPM), retryDelay 10 seconds - NOT the daily quota. Proceeding was correct.
+- A 2-text probe (09:28) and an 8-text probe (18:36) both returned HTTP 200 with 3072-dim embeddings.
+
+### 1. Change: 8 texts/batch, sequential, 3 s pacing
+- embedder.py: GEMINI_BATCH_SIZE 32 -> 8; GEMINI_MAX_CONCURRENT_BATCHES 2 -> 1; new GEMINI_PACE_SECONDS = 3.0 (was inline 0.7 s). Existing retry logic untouched (up to 5 attempts, honours Retry-After, exponential 2/4/8/16/32 s).
+- tests/test_doc_kb.py: test_gemini_batch_task_type_and_cache expectations updated for 8/batch: 35 texts -> 5 calls [8,8,8,8,3] (was 2 calls [32,3]); cached re-embed still 5 calls; query brings the total to 6 (was 3). No other test changes.
+- Note: that test sets GEMINI_API_KEY to "fake-key" under a mock and restores it after the assertions, not in try/finally - if its assertions ever fail again, the fake key leaks into the later real-API search tests (that is what caused the 2 errors on the first make test run this evening; see section 3).
+
+### 2. Full rebuild - SUCCEEDED
+- Command: make ingest INGEST_ARGS=--full. 18:38 PST, 2m41s, no 429 surfaced.
+- JSON report: {"processed": 7, "skipped": 0, "upserted": 303, "deleted": 0, "provider": "gemini", "dim": 3072, "backend": "qdrant", "model": "gemini-embedding-001", "excluded_sensitive": 0, "chunks": 300}
+- Manifest (.doc-kb/manifest.json): provider gemini, model gemini-embedding-001, dim 3072, chunk_count 300.
+- SQLite cache (.doc-kb/embeddings_cache.db): 301 rows (300 chunks + 1 query embedding), meta model gemini-embedding-001, dimension 3072; sample vectors 12,288 bytes = 3072 x float32. Was 0 rows after the morning failure.
+- Qdrant (local, .doc-kb/qdrant, collection doc_kb): 300 points, size 3072, distance Cosine, on_disk True.
+- Payload indexes: code calls create_payload_index (KEYWORD) for project_id, module, commit_sha on every rebuild, and ingest emitted the local-Qdrant UserWarning; live collection payload_schema is {} - local Qdrant does not retain KEYWORD payload indexes. Pre-existing local-mode limitation, not a rebuild failure; a server Qdrant would be needed for them to take effect.
+
+### 3. Tests
+- make test, first run after the batch change: FAILED (failures=1, errors=2, 20.4 s) - the batch-count test expected [32,3]; its assertion failure skipped the fake-key restore, so the two later real-API search tests hit Gemini with the fake key and got HTTP 400 "API key not valid".
+- After updating the test expectations: make test PASSED - Ran 10 tests in 193.284 s, OK (no skips; test_incremental_ingest_only_changed ran this time: "Incremental ingest processes 0 files when nothing changed, 1 after one edit").
+
+### 4. Searches (Gemini 3072-dim index, top_k=5, RRF scores)
+- "auth 模块怎么鉴权": 1. src/auth/jwt.py 0.02991 (vector+bm25); 2. src/auth/jwt.py 0.02988; 3. src/auth/jwt.py 0.02963; 4. src/auth/session.py 0.02963; 5. docs/modules/auth/index.md 0.01639 (vector). Morning (OpenRouter 1536-dim) had session.py first; now jwt.py leads.
+- "middleware 限流是怎么做的": 1. docs/specs/ingest-pipeline.md 0.03178; 2. docs/modules/index.md 0.03154; 3. docs/specs/overview.md 0.03125; 4. src/middleware/session.ts 0.03016; 5. docs/runbooks/rebuild-index.md 0.01613. Middleware implementation (session.ts) now appears at #4; the rate-limit answer still lives mainly in the ingest-pipeline spec.
+
 ## Update 2026-11-14 09:40 PST - Post-midnight Gemini full rebuild: probe OK, rebuild blocked by 429
 
 Credits: 3,184 at session start (09:24 PST; last seen 3,736 before this session) and 3,184 at session end. Box main was woken from Sleeping and left Running.
